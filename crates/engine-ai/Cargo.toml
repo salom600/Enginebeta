@@ -1,0 +1,13 @@
+[package]
+name = "engine-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "AI subsystem of EngineBeta (pathfinding, behavior trees, steering)"
+
+[dependencies]
+engine-core.workspace = true
+glam.workspace = true
+log.workspace = true
+parking_lot.workspace = true

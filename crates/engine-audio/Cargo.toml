@@ -1,0 +1,15 @@
+[package]
+name = "engine-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Audio subsystem of EngineBeta (rodio-based, 2D + 3D positional)"
+
+[dependencies]
+engine-core.workspace = true
+rodio.workspace = true
+glam.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+anyhow.workspace = true

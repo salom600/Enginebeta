@@ -1,0 +1,18 @@
+[package]
+name = "engine-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Rendering subsystem of EngineBeta (wgpu-based)"
+
+[dependencies]
+engine-core.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true

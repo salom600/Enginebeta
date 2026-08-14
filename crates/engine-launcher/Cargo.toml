@@ -1,0 +1,28 @@
+[package]
+name = "engine-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Demo binary that wires all EngineBeta subsystems together"
+
+[[bin]]
+name = "enginebeta"
+path = "src/main.rs"
+
+[dependencies]
+engine-core.workspace = true
+engine-render.workspace = true
+engine-physics.workspace = true
+engine-script.workspace = true
+engine-audio.workspace = true
+engine-input.workspace = true
+engine-ai.workspace = true
+engine-assets.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+glam.workspace = true
+log.workspace = true
+env_logger.workspace = true
+anyhow.workspace = true
+pollster.workspace = true

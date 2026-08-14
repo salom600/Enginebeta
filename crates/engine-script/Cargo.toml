@@ -1,0 +1,14 @@
+[package]
+name = "engine-script"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Native Rust scripting subsystem of EngineBeta"
+
+[dependencies]
+engine-core.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
