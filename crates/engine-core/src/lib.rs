@@ -12,13 +12,15 @@
 pub mod app;
 pub mod color;
 pub mod ecs;
+pub mod geom;
 pub mod time;
 pub mod transform;
 
 pub use app::{App, AppBuilder, Stage};
 pub use color::Color;
 pub use ecs::{Component, Entity, World};
-pub use time::Time;
+pub use geom::{Aabb, Plane, Ray};
+pub use time::{FpsCounter, Time};
 pub use transform::Transform;
 
 /// Re-export of `glam` vector / matrix types so the whole engine uses one math backend.

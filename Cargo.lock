@@ -732,6 +732,7 @@ dependencies = [
  "env_logger",
  "glam",
  "log",
+ "parking_lot",
  "pollster",
  "wgpu",
  "winit",

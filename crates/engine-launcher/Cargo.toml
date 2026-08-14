@@ -26,3 +26,4 @@ log.workspace = true
 env_logger.workspace = true
 anyhow.workspace = true
 pollster.workspace = true
+parking_lot.workspace = true

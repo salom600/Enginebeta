@@ -1,30 +1,30 @@
-//! engine-physics — rigid bodies, gravity, and sphere–sphere collision resolution.
+//! engine-physics — rigid bodies, gravity, collisions, and force generators.
 //!
-//! This is a deliberately small physics core: enough to make things feel "game-y"
-//! without pulling in a 50k-LOC dependency. It runs on the fixed timestep
-//! provided by [`engine_core::App`].
+//! Collisions:
+//! - Sphere–sphere (with impulse response)
+//! - AABB–AABB (minimum translation vector on smallest axis)
+//! - Sphere–AABB (closest-point-on-box)
 //!
-//! Components:
-//! - [`RigidBody`] — linear + angular velocity, mass, gravity scale
-//! - [`ColliderSphere`] — spherical collider
-//! - [`ColliderAabb`] — axis-aligned box collider
-//!
-//! Systems:
-//! - [`step_gravity`] — applies gravity to every rigid body
-//! - [`integrate`] — moves each rigid body by `velocity * dt`
-//! - [`resolve_sphere_sphere`] — pushes overlapping pairs apart and applies
-//!   a simple impulse response (no rotation, no friction)
+//! Force generators:
+//! - Wind (with turbulence)
+//! - Explosion (radial impulse with distance + time decay)
+//! - Point gravity (inverse-square)
 //!
 //! For real production physics, swap this module out for `rapier3d` — the
 //! rest of the engine doesn't care.
 
 pub mod body;
 pub mod collider;
+pub mod forces;
 pub mod systems;
 
 pub use body::{IntegrationMode, RigidBody};
 pub use collider::{ColliderAabb, ColliderSphere};
-pub use systems::{floor_clamp, integrate, resolve_sphere_sphere, step_gravity, step_world};
+pub use forces::{ExplosionForce, ForceGenerator, ForceRegistry, PointGravityForce, WindForce};
+pub use systems::{
+    floor_clamp, integrate, resolve_aabb_aabb, resolve_sphere_aabb, resolve_sphere_sphere,
+    sphere_aabb, step_gravity, step_world,
+};
 
 use glam::Vec3;
 
