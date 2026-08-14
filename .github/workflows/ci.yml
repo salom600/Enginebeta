@@ -19,8 +19,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # edition2024 (used by hashbrown 0.17+) requires Rust 1.85+.
-  RUST_TOOLCHAIN: '1.85.0'
+  # edition2024 (hashbrown 0.17+) needs 1.85; wayland-protocols 0.32 needs 1.86.
+  # Use stable so we always pick up newer MSRV-bumped deps.
+  RUST_TOOLCHAIN: 'stable'
 
 jobs:
   build:
