@@ -64,6 +64,12 @@ pub struct Renderer {
     scene_uniform_buffer: Option<wgpu::Buffer>,
     scene_bind_group: Option<wgpu::BindGroup>,
     scene_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    /// Shadow-pass-only bind group: just the scene UBO (no shadow texture).
+    /// Required because the shadow pass writes to the shadow_map as a depth
+    /// attachment, and wgpu forbids using the same texture as both a RESOURCE
+    /// (bind group binding) and DEPTH_STENCIL_WRITE in the same render pass.
+    shadow_scene_bind_group: Option<wgpu::BindGroup>,
+    shadow_scene_bind_group_layout: Option<wgpu::BindGroupLayout>,
     material_uniform_buffer: Option<wgpu::Buffer>,
     material_bind_group: Option<wgpu::BindGroup>,
     material_bind_group_layout: Option<wgpu::BindGroupLayout>,
@@ -112,6 +118,8 @@ impl Renderer {
             scene_uniform_buffer: None,
             scene_bind_group: None,
             scene_bind_group_layout: None,
+            shadow_scene_bind_group: None,
+            shadow_scene_bind_group_layout: None,
             material_uniform_buffer: None,
             material_bind_group: None,
             material_bind_group_layout: None,
@@ -369,13 +377,43 @@ impl Renderer {
                 cache: None,
             });
 
-        // --- Shadow pipeline (vertex-only, scene + model bind groups) ---
+        // --- Shadow-scene bind group (scene UBO only, NO shadow texture) ---
+        // The shadow pass writes to the shadow_map as a depth attachment, so it
+        // can't also bind the shadow_map as a shader resource in the same pass.
+        // This separate bind group layout has only the scene UBO; the shadow
+        // shader doesn't sample the shadow_map anyway (it only writes depth).
+        let shadow_scene_bgl =
+            self.ctx
+                .device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("shadow_scene_bgl"),
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                });
+        let shadow_scene_bg = self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow_scene_bg"),
+            layout: &shadow_scene_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: scene_ubo.as_entire_binding(),
+            }],
+        });
+
+        // --- Shadow pipeline (vertex-only, shadow-scene + model bind groups) ---
         let shadow_pipeline_layout = self
             .ctx
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("shadow_pipeline_layout"),
-                bind_group_layouts: &[&scene_bgl, &model_bgl],
+                bind_group_layouts: &[&shadow_scene_bgl, &model_bgl],
                 push_constant_ranges: &[],
             });
         let shadow_pipeline = self
@@ -421,6 +459,8 @@ impl Renderer {
         self.scene_uniform_buffer = Some(scene_ubo);
         self.scene_bind_group = Some(scene_bg);
         self.scene_bind_group_layout = Some(scene_bgl);
+        self.shadow_scene_bind_group = Some(shadow_scene_bg);
+        self.shadow_scene_bind_group_layout = Some(shadow_scene_bgl);
         self.material_uniform_buffer = Some(material_ubo);
         self.material_bind_group = Some(material_bg);
         self.material_bind_group_layout = Some(material_bgl);
@@ -501,10 +541,18 @@ impl Renderer {
             });
 
         // --- Shadow pass: render depth from the light's POV ---
-        if let (Some(shadow_pipeline), Some(shadow_view), Some(scene_bg), Some(model_bg)) = (
+        // Use the shadow_scene_bg (no shadow texture binding) — otherwise wgpu
+        // rejects the pass because the shadow_map can't be both a RESOURCE
+        // (bind group) and DEPTH_STENCIL_WRITE (attachment) in the same pass.
+        if let (
+            Some(shadow_pipeline),
+            Some(shadow_view),
+            Some(shadow_scene_bg),
+            Some(model_bg),
+        ) = (
             &self.shadow_pipeline,
             &self.shadow_view,
-            &self.scene_bind_group,
+            &self.shadow_scene_bind_group,
             &self.model_bind_group,
         ) {
             let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -522,7 +570,7 @@ impl Renderer {
                 occlusion_query_set: None,
             });
             shadow_pass.set_pipeline(shadow_pipeline);
-            shadow_pass.set_bind_group(0, scene_bg, &[]);
+            shadow_pass.set_bind_group(0, shadow_scene_bg, &[]);
             for (i, dc) in draw_calls.iter().enumerate().take(count) {
                 let offset = (i as u32) * MODEL_UNIFORM_STRIDE as u32;
                 shadow_pass.set_bind_group(1, model_bg, &[offset]);
