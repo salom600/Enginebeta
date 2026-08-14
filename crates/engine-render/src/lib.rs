@@ -263,7 +263,15 @@ impl Renderer {
             layout: &material_bgl,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: material_ubo.as_entire_binding(),
+                // Bind a single-stride window (256 bytes) into the UBO. The
+                // dynamic offset at `set_bind_group` time shifts this window
+                // across the 16 KB buffer. Binding the entire buffer with
+                // `as_entire_binding()` would leave zero room for offsets.
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &material_ubo,
+                    offset: 0,
+                    size: Some(wgpu::BufferSize::new(MATERIAL_UNIFORM_STRIDE).unwrap()),
+                }),
             }],
         });
 
@@ -298,7 +306,13 @@ impl Renderer {
             layout: &model_bgl,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: model_ubo.as_entire_binding(),
+                // Same pattern as material_bg: bind a 256-byte window so the
+                // dynamic offset can shift it across the 16 KB buffer.
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &model_ubo,
+                    offset: 0,
+                    size: Some(wgpu::BufferSize::new(MODEL_UNIFORM_STRIDE).unwrap()),
+                }),
             }],
         });
 
