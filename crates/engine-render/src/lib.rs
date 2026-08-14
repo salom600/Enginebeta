@@ -36,8 +36,14 @@ use wgpu::SurfaceError;
 pub const MODEL_UNIFORM_STRIDE: u64 = 256;
 /// Same for materials (32 bytes content, padded to 256).
 pub const MATERIAL_UNIFORM_STRIDE: u64 = 256;
-/// Max draw calls supported per frame (matches the buffer capacity).
-pub const MAX_DRAW_CALLS: usize = 256;
+/// Max draw calls supported per frame.
+///
+/// Capped at 64 (not 256) so the total uniform buffer binding stays at
+/// 64 × 256 = 16384 bytes — exactly DX12's `max_*_buffer_binding_size` limit
+/// (inherited from `D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT` = 4096 floats).
+/// Going above 64 draw calls per frame would require switching to a storage
+/// buffer, which has different alignment rules and is overkill for the MVP.
+pub const MAX_DRAW_CALLS: usize = 64;
 
 /// A single draw call: a mesh + its world-space transform + its material.
 pub struct DrawCall<'a> {
