@@ -7,6 +7,9 @@
 //! - Per-mesh model matrices (so each cube can have its own transform)
 //! - Raycasting for mouse picking
 //! - FlyCamera for first-person navigation
+//!
+//! v0.2.1 hotfix: replaced `push_constant` (unsupported on DX12) with a
+//! dynamic-offset uniform buffer for per-draw-call model matrices.
 
 pub mod camera;
 pub mod light;
@@ -26,6 +29,15 @@ use crate::context::RenderContext;
 use engine_core::Color;
 use glam::Mat4;
 use wgpu::SurfaceError;
+
+/// Size of one ModelUniform entry in the dynamic uniform buffer.
+/// Wgpu requires uniform buffer offsets to be aligned to `min_uniform_buffer_offset_alignment`,
+/// which is 256 on virtually every backend. We pad to 256 to be safe.
+pub const MODEL_UNIFORM_STRIDE: u64 = 256;
+/// Same for materials (32 bytes content, padded to 256).
+pub const MATERIAL_UNIFORM_STRIDE: u64 = 256;
+/// Max draw calls supported per frame (matches the buffer capacity).
+pub const MAX_DRAW_CALLS: usize = 256;
 
 /// A single draw call: a mesh + its world-space transform + its material.
 pub struct DrawCall<'a> {
@@ -49,10 +61,12 @@ pub struct Renderer {
     material_uniform_buffer: Option<wgpu::Buffer>,
     material_bind_group: Option<wgpu::BindGroup>,
     material_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    model_uniform_buffer: Option<wgpu::Buffer>,
+    model_bind_group: Option<wgpu::BindGroup>,
+    model_bind_group_layout: Option<wgpu::BindGroupLayout>,
     shadow_texture: Option<wgpu::Texture>,
     shadow_view: Option<wgpu::TextureView>,
     shadow_sampler: Option<wgpu::Sampler>,
-    shadow_bind_group: Option<wgpu::BindGroup>,
 }
 
 impl Renderer {
@@ -95,10 +109,12 @@ impl Renderer {
             material_uniform_buffer: None,
             material_bind_group: None,
             material_bind_group_layout: None,
+            model_uniform_buffer: None,
+            model_bind_group: None,
+            model_bind_group_layout: None,
             shadow_texture: None,
             shadow_view: None,
             shadow_sampler: None,
-            shadow_bind_group: None,
             config,
         })
     }
@@ -165,7 +181,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        // Shadow map texture (1024x1024 depth-only).
+        // Shadow map texture (2048x2048 depth-only).
         let shadow_texture = self.ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shadow_map"),
             size: wgpu::Extent3d {
@@ -229,10 +245,10 @@ impl Renderer {
                         count: None,
                     }],
                 });
-        // Stash 256 materials worth of uniforms (32 bytes each → 8 KiB).
+        // Stash MAX_DRAW_CALLS materials, each MATERIAL_UNIFORM_STRIDE bytes.
         let material_ubo = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("material_ubo"),
-            size: 256 * std::mem::size_of::<MaterialUniform>() as u64,
+            size: MAX_DRAW_CALLS as u64 * MATERIAL_UNIFORM_STRIDE,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -245,17 +261,49 @@ impl Renderer {
             }],
         });
 
-        // --- Main pipeline layout ---
+        // --- Model uniform bind group (dynamic offset, replaces push constants) ---
+        // DX12 does not support push constants in wgpu 22, so we use a dynamic-
+        // offset uniform buffer. Each draw call writes its model matrix at
+        // offset = i * MODEL_UNIFORM_STRIDE.
+        let model_bgl =
+            self.ctx
+                .device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("model_bgl"),
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                });
+        let model_ubo = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("model_ubo"),
+            size: MAX_DRAW_CALLS as u64 * MODEL_UNIFORM_STRIDE,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let model_bg = self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("model_bg"),
+            layout: &model_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: model_ubo.as_entire_binding(),
+            }],
+        });
+
+        // --- Main pipeline layout (3 bind groups: scene + model + material) ---
         let pipeline_layout =
             self.ctx
                 .device
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("main_pipeline_layout"),
-                    bind_group_layouts: &[&scene_bgl, &material_bgl],
-                    push_constant_ranges: &[wgpu::PushConstantRange {
-                        stages: wgpu::ShaderStages::VERTEX,
-                        range: 0..64, // mat4 model matrix (64 bytes)
-                    }],
+                    bind_group_layouts: &[&scene_bgl, &model_bgl, &material_bgl],
+                    push_constant_ranges: &[],
                 });
 
         let pipeline = self
@@ -301,17 +349,14 @@ impl Renderer {
                 cache: None,
             });
 
-        // --- Shadow pipeline (vertex-only, writes to shadow depth) ---
+        // --- Shadow pipeline (vertex-only, scene + model bind groups) ---
         let shadow_pipeline_layout = self
             .ctx
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("shadow_pipeline_layout"),
-                bind_group_layouts: &[&scene_bgl],
-                push_constant_ranges: &[wgpu::PushConstantRange {
-                    stages: wgpu::ShaderStages::VERTEX,
-                    range: 0..64,
-                }],
+                bind_group_layouts: &[&scene_bgl, &model_bgl],
+                push_constant_ranges: &[],
             });
         let shadow_pipeline = self
             .ctx
@@ -359,13 +404,12 @@ impl Renderer {
         self.material_uniform_buffer = Some(material_ubo);
         self.material_bind_group = Some(material_bg);
         self.material_bind_group_layout = Some(material_bgl);
+        self.model_uniform_buffer = Some(model_ubo);
+        self.model_bind_group = Some(model_bg);
+        self.model_bind_group_layout = Some(model_bgl);
         self.shadow_texture = Some(shadow_texture);
         self.shadow_view = Some(shadow_view);
         self.shadow_sampler = Some(shadow_sampler);
-        // shadow pass uses the same scene bind group as the main pass; we just
-        // reference it via `&scene_bind_group` at draw time, so we don't need a
-        // separate field here. The field is kept for future per-light shadow maps.
-        self.shadow_bind_group = None;
         Ok(())
     }
 
@@ -376,7 +420,10 @@ impl Renderer {
         }
         self.config.width = width;
         self.config.height = height;
-        self.ctx.surface.configure(&self.ctx.device, &self.config);
+        // Borrow the device through the context — split the borrow to avoid
+        // simultaneous `&self.config` and `&mut self.ctx` conflicts.
+        let config = self.config.clone();
+        self.ctx.surface.configure(&self.ctx.device, &config);
     }
 
     /// Render one frame: shadow pass → main pass.
@@ -401,20 +448,29 @@ impl Renderer {
                 .write_buffer(buf, 0, bytemuck::bytes_of(&scene_uniform));
         }
 
-        // --- Upload materials (one per draw call, stashed in the dynamic buffer) ---
-        let mat_uniform_size = std::mem::size_of::<MaterialUniform>() as u64;
+        // --- Upload model matrices + materials (one per draw call) ---
+        // Both buffers use 256-byte strides to satisfy wgpu's
+        // min_uniform_buffer_offset_alignment on every backend.
+        let mut model_bytes = vec![0u8; MAX_DRAW_CALLS * MODEL_UNIFORM_STRIDE as usize];
+        let mut material_bytes = vec![0u8; MAX_DRAW_CALLS * MATERIAL_UNIFORM_STRIDE as usize];
+        let count = draw_calls.len().min(MAX_DRAW_CALLS);
+        for (i, dc) in draw_calls.iter().enumerate().take(count) {
+            let model_cols = dc.model.to_cols_array();
+            let m = ModelUniform::from_cols_array(&model_cols);
+            let model_off = i * MODEL_UNIFORM_STRIDE as usize;
+            model_bytes[model_off..model_off + std::mem::size_of::<ModelUniform>()]
+                .copy_from_slice(bytemuck::bytes_of(&m));
+
+            let mat = MaterialUniform::from(dc.material);
+            let mat_off = i * MATERIAL_UNIFORM_STRIDE as usize;
+            material_bytes[mat_off..mat_off + std::mem::size_of::<MaterialUniform>()]
+                .copy_from_slice(bytemuck::bytes_of(&mat));
+        }
+        if let Some(buf) = &self.model_uniform_buffer {
+            self.ctx.queue.write_buffer(buf, 0, &model_bytes);
+        }
         if let Some(buf) = &self.material_uniform_buffer {
-            for (i, dc) in draw_calls.iter().enumerate() {
-                if i >= 256 {
-                    break;
-                }
-                let m = MaterialUniform::from(dc.material);
-                self.ctx.queue.write_buffer(
-                    buf,
-                    i as u64 * mat_uniform_size,
-                    bytemuck::bytes_of(&m),
-                );
-            }
+            self.ctx.queue.write_buffer(buf, 0, &material_bytes);
         }
 
         let mut encoder = self
@@ -425,10 +481,11 @@ impl Renderer {
             });
 
         // --- Shadow pass: render depth from the light's POV ---
-        if let (Some(shadow_pipeline), Some(shadow_view), Some(scene_bg)) = (
+        if let (Some(shadow_pipeline), Some(shadow_view), Some(scene_bg), Some(model_bg)) = (
             &self.shadow_pipeline,
             &self.shadow_view,
             &self.scene_bind_group,
+            &self.model_bind_group,
         ) {
             let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow_pass"),
@@ -446,11 +503,14 @@ impl Renderer {
             });
             shadow_pass.set_pipeline(shadow_pipeline);
             shadow_pass.set_bind_group(0, scene_bg, &[]);
-            for dc in draw_calls {
-                let model_bytes = dc.model.to_cols_array();
-                shadow_pass.set_push_constants(wgpu::ShaderStages::VERTEX, 0, bytemuck::cast_slice(&model_bytes));
+            for (i, dc) in draw_calls.iter().enumerate().take(count) {
+                let offset = (i as u32) * MODEL_UNIFORM_STRIDE as u32;
+                shadow_pass.set_bind_group(1, model_bg, &[offset]);
                 shadow_pass.set_vertex_buffer(0, dc.mesh.vertex_buffer.slice(..));
-                shadow_pass.set_index_buffer(dc.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                shadow_pass.set_index_buffer(
+                    dc.mesh.index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint16,
+                );
                 shadow_pass.draw_indexed(0..dc.mesh.index_count, 0, 0..1);
             }
         }
@@ -505,25 +565,19 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            if let (Some(pipeline), Some(scene_bg), Some(mat_bg)) = (
+            if let (Some(pipeline), Some(scene_bg), Some(model_bg), Some(mat_bg)) = (
                 &self.pipeline,
                 &self.scene_bind_group,
+                &self.model_bind_group,
                 &self.material_bind_group,
             ) {
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, scene_bg, &[]);
-                for (i, dc) in draw_calls.iter().enumerate() {
-                    if i >= 256 {
-                        break;
-                    }
-                    let model_bytes = dc.model.to_cols_array();
-                    pass.set_push_constants(
-                        wgpu::ShaderStages::VERTEX,
-                        0,
-                        bytemuck::cast_slice(&model_bytes),
-                    );
-                    let offset = i as u32 * mat_uniform_size as u32;
-                    pass.set_bind_group(1, mat_bg, &[offset]);
+                for (i, dc) in draw_calls.iter().enumerate().take(count) {
+                    let model_offset = (i as u32) * MODEL_UNIFORM_STRIDE as u32;
+                    let mat_offset = (i as u32) * MATERIAL_UNIFORM_STRIDE as u32;
+                    pass.set_bind_group(1, model_bg, &[model_offset]);
+                    pass.set_bind_group(2, mat_bg, &[mat_offset]);
                     pass.set_vertex_buffer(0, dc.mesh.vertex_buffer.slice(..));
                     pass.set_index_buffer(
                         dc.mesh.index_buffer.slice(..),
@@ -554,6 +608,33 @@ pub struct SceneUniform {
     pub light_view_proj: [[f32; 4]; 4],
 }
 
+/// GPU-side model matrix uniform. Stored at offset `i * 256` in the dynamic
+/// uniform buffer. The 64-byte mat4 is followed by padding so each entry is
+/// exactly 256 bytes (matches wgpu's `min_uniform_buffer_offset_alignment` on
+/// every backend). The padding is expressed as a `[f32; 48]` array because
+/// bytemuck can derive Pod/Zeroable for fixed-size f32 arrays (but not [u8; N>32]).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ModelUniform {
+    pub model: [[f32; 4]; 4],
+    pub _pad: [f32; 48], // 48 floats × 4 bytes = 192 bytes → total struct = 256 bytes
+}
+
+impl ModelUniform {
+    pub fn from_cols_array(arr: &[f32; 16]) -> Self {
+        let mut model = [[0f32; 4]; 4];
+        for r in 0..4 {
+            for c in 0..4 {
+                model[r][c] = arr[r * 4 + c];
+            }
+        }
+        Self {
+            model,
+            _pad: [0.0; 48],
+        }
+    }
+}
+
 const MAIN_SHADER_SRC: &str = r#"
 struct SceneUniform {
     view_proj: mat4x4<f32>,
@@ -571,9 +652,11 @@ struct MaterialUniform {
     albedo_metallic: vec4<f32>,
     roughness_emissive: vec4<f32>,
 };
-@group(1) @binding(0) var<uniform> material: MaterialUniform;
+@group(2) @binding(0) var<uniform> material: MaterialUniform;
 
-var<push_constant> model: mat4x4<f32>;
+// Per-draw-call model matrix — dynamic-offset uniform buffer.
+// (Replaces `var<push_constant>` which DX12 doesn't support in wgpu 22.)
+@group(1) @binding(0) var<uniform> model: mat4x4<f32>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -594,12 +677,10 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     let world_pos = model * vec4<f32>(in.position, 1.0);
     out.clip_position = scene.view_proj * world_pos;
-    // Normal matrix (for uniform scale, model's upper 3x3 works)
     let world_normal = normalize((model * vec4<f32>(in.normal, 0.0)).xyz);
     out.world_normal = world_normal;
     out.world_pos = world_pos.xyz;
     out.albedo = in.color;
-    // Shadow space: bias the depth into [0, 1] for the depth comparison.
     let shadow = scene.light_view_proj * world_pos;
     out.shadow_coord = vec4<f32>(
         shadow.x * 0.5 + 0.5,
@@ -611,7 +692,6 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 }
 
 fn sample_shadow(shadow_coord: vec4<f32>) -> f32 {
-    // Basic PCF 3x3 shadow sampling.
     let coord = shadow_coord.xyz / shadow_coord.w;
     if (coord.x < 0.0 || coord.x > 1.0 || coord.y < 0.0 || coord.y > 1.0) {
         return 1.0;
@@ -641,9 +721,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let NdotL = max(dot(N, L), 0.0);
     let NdotH = max(dot(N, H), 0.0);
-    let NdotV = max(dot(N, V), 0.0);
+    let _NdotV = max(dot(N, V), 0.0);
 
-    // Specular: Blinn-Phong, modulated by material's metallic + roughness.
     let shininess = mix(8.0, 256.0, 1.0 - material.roughness_emissive.x);
     let spec_strength = mix(0.1, 1.0, material.albedo_metallic.w);
     let spec = spec_strength * pow(NdotH, shininess) * NdotL;
@@ -670,7 +749,8 @@ struct SceneUniform {
 };
 @group(0) @binding(0) var<uniform> scene: SceneUniform;
 
-var<push_constant> model: mat4x4<f32>;
+// Per-draw-call model matrix — dynamic-offset uniform buffer.
+@group(1) @binding(0) var<uniform> model: mat4x4<f32>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
